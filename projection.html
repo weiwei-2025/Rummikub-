@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <title>投影畫面・Rummikub</title>
+  <style>
+    html,body{margin:0;padding:0;background:#ffe9d5;font-family:Arial,"Noto Sans TC",system-ui;color:#243b53}
+    .wrap{padding:18px}
+    .topbar{display:flex;justify-content:center;align-items:center;gap:24px;margin-bottom:12px}
+    .badge{font-size:32px;font-weight:900;background:#ffc857;padding:12px 24px;border-radius:14px;box-shadow:0 10px 24px rgba(0,0,0,.12)}
+    .timer{font-size:40px;font-weight:900;padding:12px 28px;border-radius:14px;background:#111;color:#ffe9c6;letter-spacing:1px}
+    .btn{padding:8px 14px;border-radius:10px;background:#30343f;color:#fff;border:none;cursor:pointer;font-size:16px}
+    .row{display:flex;gap:16px;justify-content:center;width:100%}
+    .card{background:#fff7f2;border:6px solid #f2c9ab;border-radius:18px;width:11.5%;min-width:150px;box-sizing:border-box;padding:10px;box-shadow:0 6px 18px rgba(0,0,0,.06)}
+    .num{text-align:center;font-weight:900;color:#c68612;margin-bottom:6px}
+    .player{font-size:18px;line-height:1.25;margin-top:6px;padding:6px 8px;border-radius:6px;border-left:8px solid #ddd}
+    .win{background:#ffeb66;font-weight:900;color:#000}
+    .pager{display:flex;gap:12px;justify-content:center;align-items:center;margin-top:14px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div id="roundBadge" class="badge">...</div>
+      <div id="timerBox" class="timer">00:20:00</div>
+      <button class="btn" onclick="document.documentElement.requestFullscreen?.()">全螢幕</button>
+    </div>
+
+    <div id="cardsTop" class="row"></div>
+    <div id="cardsBottom" class="row" style="margin-top:14px;"></div>
+
+    <div class="pager">
+      <button id="prevBtn" class="btn">⬅ 上一頁</button>
+      <span id="pageInfo"></span>
+      <button id="nextBtn" class="btn">下一頁 ➡</button>
+    </div>
+  </div>
+
+<script>
+let bc = null;
+try { bc = new BroadcastChannel("rummikub-bracket"); } catch {}
+
+let localPageIndex = 0;
+let lastPayload = null;
+
+function fmt(s){
+  s=Math.max(0,Math.floor(s||0));
+  const h=String(Math.floor(s/3600)).padStart(2,"0");
+  const m=String(Math.floor((s%3600)/60)).padStart(2,"0");
+  const sec=String(Math.floor(s%60)).padStart(2,"0");
+  return h+":"+m+":"+sec;
+}
+function el(tag, cls, text){ const e=document.createElement(tag); if(cls) e.className=cls; if(text!=null) e.textContent=text; return e; }
+const PALETTE=["#ffd873","#c6e9ff","#ffe0f0","#e6ffd9","#f0e6ff","#ffdede","#e8f5ff","#fff4d6","#e6ffe7","#f6e8ff"];
+
+function renderProjection(payload){
+  lastPayload = payload;
+  if(!payload) return;
+  const { roundName, clockSeconds, currentMatches=[], pageSize=16, winnersMap={} } = payload;
+  const totalPages = Math.max(1, Math.ceil(currentMatches.length / pageSize));
+  const pageIndex = Math.min(localPageIndex, totalPages - 1);
+
+  document.getElementById("roundBadge").textContent = roundName || "";
+  document.getElementById("timerBox").textContent = fmt(clockSeconds || 0);
+  document.getElementById("pageInfo").textContent = `第 ${pageIndex+1} / ${totalPages} 頁`;
+
+  const start = pageIndex * pageSize;
+  const pageMatches = currentMatches.slice(start, start + pageSize);
+  const top = pageMatches.slice(0, Math.min(8, pageMatches.length));
+  const bottom = pageMatches.slice(Math.min(8, pageMatches.length));
+
+  const ct = document.getElementById("cardsTop"); ct.innerHTML = "";
+  const cb = document.getElementById("cardsBottom"); cb.innerHTML = "";
+
+  function row(container, matches){
+    matches.forEach((m)=>{
+      const c = el("div","card");
+      c.appendChild(el("div","num","第"+(m.id||"")+"桌"));
+      (m.players||[]).forEach((p,i)=>{
+        const key = (roundName||"")+"-"+(m.id||"");
+        const w = winnersMap[key];
+        const isWin =
+          (w && typeof w === "object" && w.name === p && w.idx === i) ||
+          w === p; // 相容舊版（只有字串）
+        const item = el("div","player"+(isWin?" win":""), p);
+        item.style.borderLeftColor = PALETTE[i%PALETTE.length];
+        c.appendChild(item);
+      });
+      container.appendChild(c);
+    });
+  }
+  row(ct, top);
+  row(cb, bottom);
+}
+
+function send(type){
+  try { window.opener && window.opener.postMessage({ type }, "*"); } catch {}
+  try { bc && bc.postMessage({ type }); } catch {}
+}
+
+document.getElementById("prevBtn").onclick = () => {
+  if (!lastPayload) return;
+  localPageIndex = Math.max(localPageIndex - 1, 0);
+  renderProjection(lastPayload);
+  send("proj_page_prev");
+};
+document.getElementById("nextBtn").onclick = () => {
+  if (!lastPayload) return;
+  localPageIndex++;
+  renderProjection(lastPayload);
+  send("proj_page_next");
+};
+
+window.addEventListener("keydown",(e)=>{
+  if(e.key==="ArrowLeft") document.getElementById("prevBtn").click();
+  if(e.key==="ArrowRight") document.getElementById("nextBtn").click();
+});
+
+window.addEventListener("message",(ev)=>{ if(ev?.data?.type==="update") renderProjection(ev.data); });
+if (bc) bc.onmessage = (ev)=>{ if(ev?.data?.type==="update") renderProjection(ev.data); };
+
+// 啟動請求主控初始資料
+try { bc && bc.postMessage({type:"request_init"}); } catch {}
+try { window.opener && window.opener.postMessage({type:"request_init"}, "*"); } catch {}
+</script>
+</body>
+</html>
