@@ -173,22 +173,37 @@ export default function App() {
     } catch {}
   };
 
-/* ---------- 開啟投影視窗（載入 projection.html） ---------- */
+/* ---------- 開啟投影視窗（兼容 iframe / 預覽 / 部署） ---------- */
 const openProjectionWindow = () => {
+  // 若投影視窗已存在就直接更新內容
   if (projectionRef.current && !projectionRef.current.closed) {
     projectionRef.current.focus();
-    broadcastState(); // 確保資料即時更新
+    broadcastState();
     return;
   }
 
-  // ✅ 直接打開 public/projection.html（或根目錄同層）
-  const w = window.open("projection.html", "rummikub-projection", "width=1280,height=720");
-  projectionRef.current = w;
+  const url = `${location.origin}/projection.html`;
 
-  // 等投影頁載入完成後再傳送目前狀態
+  // 🅰️ 主要開啟方式：建立隱藏 <a> 元素來觸發新分頁（避開 iframe 限制）
+  const a = document.createElement("a");
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  // 🅱️ 保底方式（如果瀏覽器擋掉 <a>，再試一次 window.open）
+  try {
+    projectionRef.current = window.open(url, "rummikub-projection", "width=1280,height=720");
+  } catch (err) {
+    console.warn("投影視窗開啟失敗，可能被瀏覽器阻擋：", err);
+    alert("⚠️ 投影視窗被瀏覽器阻擋，請允許彈出視窗或手動開啟 /projection.html");
+  }
+
+  // 延遲同步投影畫面狀態
   setTimeout(() => broadcastState(), 1000);
 };
-
 
   /* ---------- 匯入 Excel ---------- */
   const handleFile = async (e) => {
