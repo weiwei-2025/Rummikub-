@@ -122,6 +122,33 @@ if (bc) bc.onmessage = (ev)=>{ if(ev?.data?.type==="update") renderProjection(ev
 // 啟動請求主控初始資料
 try { bc && bc.postMessage({type:"request_init"}); } catch {}
 try { window.opener && window.opener.postMessage({type:"request_init"}, "*"); } catch {}
+
+  // ★ 換成你的 Web App URL
+  const CLOUD_URL = "https://script.google.com/macros/s/AKfycbz9GZJy2pG4UH1Qo7oPD0NFs2UJBpou426UphfagMydOi4Vo-vbpbPEpqTiRUAFgbL6PQ/exec";
+  let lastTs = 0;
+
+  async function pullFromCloud() {
+    try {
+      const res = await fetch(CLOUD_URL, { method: "GET", cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json(); // { ts, ...payload }
+      if (data?.ts && data.ts !== lastTs) {
+        lastTs = data.ts;
+        // 讓投影端直接用主控端送來的 payload 繪製（包含 currentMatches / winners / pageIndex / timer）
+        renderProjection({
+          type: "update",
+          ...data
+        });
+      }
+    } catch (e) {
+      // 網路不穩時可忽略
+    }
+  }
+
+  // 每 2 秒拉一次（你可依現場需求改 1000~5000ms）
+  setInterval(pullFromCloud, 2000);
+  // 頁面剛載入先拉一次
+  pullFromCloud();
 </script>
 </body>
 </html>
