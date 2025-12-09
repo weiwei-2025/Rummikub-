@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
-// ★ 請在此填入新的 Apps Script URL
+// ★ 請確認這裡的網址與 Apps Script 部署網址一致
 const CLOUD_URL = "https://script.google.com/macros/s/AKfycbwHY_vKfpnTb6trh_SCGQznZduwhS43bpDsjhwdLwG9jbv5DH72Q6qT3gw4X-Yc60xB/exec";
 
 /* ---------------- helpers ---------------- */
@@ -38,45 +38,45 @@ export default function App() {
   const [timerRunning, setTimerRunning] = useState(false);
 
   // --- 系統狀態 ---
-  const [lastTs, setLastTs] = useState(0); // 記錄最後一次資料的時間戳
+  const [lastTs, setLastTs] = useState(0); 
   const [isSyncing, setIsSyncing] = useState(false);
+  const [ignoreCloudUntil, setIgnoreCloudUntil] = useState(0); // ★ 新增：暫停同步的冷卻時間
   const projectionRef = useRef(null);
   const bcRef = useRef(null);
   
   // --- 1. 初始化與雲端同步 (Poll Data) ---
   useEffect(() => {
-    // 啟動時先拉一次資料
     fetchCloudData();
-
-    // 設定輪詢 (Polling)：每 3 秒檢查一次雲端有沒有別人更新的資料
     const interval = setInterval(() => {
       fetchCloudData();
-    }, 3000);
-
+    }, 2000); // 縮短為2秒更新一次，反應更快
     return () => clearInterval(interval);
-  }, []); // 只在掛載時執行
+  }, [ignoreCloudUntil]); // 加入依賴
 
   const fetchCloudData = async () => {
+    // ★ 關鍵修正：如果還在冷卻時間內，完全不抓取雲端資料，避免閃爍
+    if (Date.now() < ignoreCloudUntil) return;
+
     try {
       const res = await fetch(CLOUD_URL);
       if (!res.ok) return;
       const data = await res.json();
       
-      // 如果雲端資料比本地新 (ts 更大)，則更新本地畫面
       if (data.ts && data.ts > lastTs) {
-        console.log("📥 檢測到雲端更新，同步中...");
+        // console.log("📥 同步雲端資料...");
         
-        // 批次更新所有狀態
         if (data.rounds) setRounds(data.rounds);
         if (data.currentRoundName) setCurrentRoundName(data.currentRoundName);
         if (data.currentMatches) setCurrentMatches(data.currentMatches);
-        if (data.winnersMap) setTableWinners(data.winnersMap);
-        if (data.pageIndices) setPageIndices(data.pageIndices);
         
-        // 計時器同步 (以防兩邊時間差太多)
+        // 使用合併策略，防止資料丟失
+        if (data.winnersMap) {
+          setTableWinners((prev) => ({ ...prev, ...data.winnersMap }));
+        }
+
+        if (data.pageIndices) setPageIndices(data.pageIndices);
         if (typeof data.clockSeconds === 'number') {
-           // 只有當誤差超過 2 秒才校正，避免計時器一直跳動
-           setClockSeconds(prev => Math.abs(prev - data.clockSeconds) > 2 ? data.clockSeconds : prev);
+           setClockSeconds(prev => Math.abs(prev - data.clockSeconds) > 3 ? data.clockSeconds : prev);
         }
         if (typeof data.timerRunning === 'boolean') setTimerRunning(data.timerRunning);
 
@@ -88,13 +88,15 @@ export default function App() {
   };
 
   // --- 2. 資料上傳 (Push Data) ---
-  // 建立一個可以隨時呼叫的儲存函數，將當前所有狀態打包上傳
   const saveDataToCloud = async (overrideState = {}) => {
     const newTs = Date.now();
-    setLastTs(newTs); // 更新本地時間戳
+    setLastTs(newTs);
     setIsSyncing(true);
+    
+    // ★ 關鍵修正：當我上傳資料時，設定 3 秒鐘的「冷卻時間」
+    // 這 3 秒內，我的電腦會忽略所有雲端傳來的資料，這樣就不會被舊資料覆蓋而閃爍
+    setIgnoreCloudUntil(Date.now() + 3000);
 
-    // 組合當前狀態 (注意：React State 可能是舊的，如果是在 setState 後立刻呼叫，需傳入 overrideState)
     const payload = {
       ts: newTs,
       rounds: overrideState.rounds || rounds,
@@ -102,24 +104,22 @@ export default function App() {
       currentMatches: overrideState.currentMatches || currentMatches,
       winnersMap: overrideState.tableWinners || tableWinners,
       pageIndices: overrideState.pageIndices || pageIndices,
-      clockSeconds: overrideState.clockSeconds ?? clockSeconds, // 這裡用 ?? 允許 0
+      clockSeconds: overrideState.clockSeconds ?? clockSeconds, 
       timerRunning: overrideState.timerRunning ?? timerRunning,
       
-      // 投影需要的額外資訊
+      // 投影參數
       pageIndex: (overrideState.pageIndices || pageIndices)[overrideState.currentRoundName || currentRoundName] || 0,
       pageSize: pageSizeForRound(overrideState.currentRoundName || currentRoundName),
       roundName: overrideState.currentRoundName || currentRoundName,
-      type: "update" // 給投影頁用的標記
+      type: "update"
     };
 
-    // 1. 廣播給本地投影頁
     broadcastToLocalProjection(payload);
 
-    // 2. 上傳至雲端
     try {
       await fetch(CLOUD_URL, {
         method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" }, // 避免 CORS 預檢請求
+        headers: { "Content-Type": "text/plain;charset=utf-8" }, 
         body: JSON.stringify(payload),
       });
     } catch (e) {
@@ -129,7 +129,7 @@ export default function App() {
     }
   };
 
-  // --- 3. 投影通訊 (BroadcastChannel + Window) ---
+  // --- 3. 投影通訊 ---
   const broadcastToLocalProjection = (payload) => {
     try { bcRef.current?.postMessage(payload); } catch {}
     try { projectionRef.current?.postMessage?.(payload, "*"); } catch {}
@@ -137,29 +137,24 @@ export default function App() {
   };
 
   useEffect(() => {
-    // 建立廣播頻道
     try {
       bcRef.current = new BroadcastChannel("rummikub-bracket");
       bcRef.current.onmessage = (ev) => {
-        if (ev.data?.type === "request_init") saveDataToCloud(); // 投影頁要資料時，廣播目前狀態
+        if (ev.data?.type === "request_init") saveDataToCloud(); 
         if (ev.data?.type === "proj_page_prev") changePage(-1);
         if (ev.data?.type === "proj_page_next") changePage(1);
       };
     } catch { bcRef.current = null; }
-
     return () => bcRef.current?.close();
-  }, [rounds, currentRoundName, tableWinners]); // 依賴變數，確保閉包內數值正確
+  }, [rounds, currentRoundName, tableWinners]); 
 
   // --- 4. 邏輯處理 ---
-  
-  // 計時器 Effect
   useEffect(() => {
     if (!timerRunning) return;
     const t = setInterval(() => {
       setClockSeconds((s) => {
         if (s <= 1) {
           setTimerRunning(false);
-          // 倒數結束也要同步一次狀態
           saveDataToCloud({ clockSeconds: 0, timerRunning: false });
           clearInterval(t);
           return 0;
@@ -170,7 +165,6 @@ export default function App() {
     return () => clearInterval(t);
   }, [timerRunning]);
 
-  // 輔助：切換頁面
   const pageSizeForRound = (rName) => rName === "準決賽" ? 4 : 16;
   const changePage = (delta) => {
     const perPage = pageSizeForRound(currentRoundName);
@@ -183,7 +177,6 @@ export default function App() {
     saveDataToCloud({ pageIndices: newIndices });
   };
 
-  // 動作：標記勝者 (核心同步點)
   const markWinner = (tableId, player, idx) => {
     const key = `${currentRoundName}-${tableId}`;
     const newWinners = {
@@ -191,11 +184,9 @@ export default function App() {
       [key]: { name: player, idx },
     };
     setTableWinners(newWinners);
-    // ★ 立即上傳雲端，讓其他人看到
     saveDataToCloud({ tableWinners: newWinners });
   };
 
-  // 動作：匯入 Excel
   const handleFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -215,8 +206,6 @@ export default function App() {
     });
 
     const firstRound = (newRounds["初賽-1"] ? "初賽-1" : "") || Object.keys(newRounds)[0] || "";
-    
-    // 更新並上傳
     const newState = {
         rounds: newRounds,
         currentRoundName: firstRound,
@@ -234,7 +223,6 @@ export default function App() {
     saveDataToCloud(newState);
   };
 
-  // 動作：下一輪
   const getNextRoundName = (current) => {
     if (current.includes("初賽")) return "複賽";
     if (current === "複賽") return "準決賽";
@@ -246,16 +234,13 @@ export default function App() {
     const nextRoundName = getNextRoundName(currentRoundName);
     if (nextRoundName === "比賽結束") return alert("已是決賽！");
 
-    // 簡單的晉級邏輯
     const allWinners = Object.entries(tableWinners);
-    // 過濾出屬於當前輪次的贏家
     const currentWinners = allWinners
-        .filter(([k]) => k.startsWith(currentRoundName.split('-')[0])) // 簡單做：如果是初賽-1, 抓 "初賽" 開頭即可
+        .filter(([k]) => k.startsWith(currentRoundName.split('-')[0])) 
         .map(([, v]) => (typeof v === "string" ? v : v?.name));
 
     if (currentWinners.length === 0) return alert("⚠️ 請先標記勝者");
 
-    // 分組邏輯 (簡化版：每4人一組)
     const nextMatches = [];
     for (let i = 0; i < currentWinners.length; i += 4) {
         nextMatches.push({
@@ -265,32 +250,26 @@ export default function App() {
     }
 
     const newRounds = { ...rounds, [nextRoundName]: nextMatches };
-    
-    // 更新並上傳
     const newState = {
         rounds: newRounds,
         currentRoundName: nextRoundName,
         currentMatches: nextMatches,
         pageIndices: {},
-        // tableWinners 不清空嗎？通常晉級表單會保留歷史贏家，若要清空可在此加
     };
 
     setRounds(newState.rounds);
     setCurrentRoundName(newState.currentRoundName);
     setCurrentMatches(newState.currentMatches);
     setPageIndices(newState.pageIndices);
-    
     saveDataToCloud(newState);
   };
   
-  // 動作：開啟投影
   const openProjectionWindow = () => {
     const w = window.open("projection.html", "rummikub-projection", "width=1280,height=720");
     projectionRef.current = w;
-    setTimeout(() => saveDataToCloud(), 1000); // 確保投影頁打開後收到資料
+    setTimeout(() => saveDataToCloud(), 1000); 
   };
 
-  // 動作：計時器操作
   const toggleTimer = () => {
       const newState = !timerRunning;
       setTimerRunning(newState);
@@ -305,7 +284,6 @@ export default function App() {
   /* ---------------- UI 渲染 ---------------- */
   return (
     <div style={{ padding: "10px 20px", fontFamily: "Arial", maxWidth: "1200px", margin: "0 auto" }}>
-      {/* Header */}
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", marginBottom: 20, gap: 10 }}>
         <h2 style={{ margin: 0 }}>🏆 Rummikub 控制台</h2>
         <div style={{ fontSize: 12, color: isSyncing ? "orange" : "green" }}>
@@ -313,16 +291,13 @@ export default function App() {
         </div>
       </div>
 
-      {/* 控制列 */}
       <div style={{ background: "#f5f5f5", padding: 15, borderRadius: 12, marginBottom: 20 }}>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 15, alignItems: "center" }}>
-            {/* 檔案與投影 */}
             <div>
                 <input type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ maxWidth: 200 }} />
                 <button onClick={openProjectionWindow} style={btnStyle}>📺 投影畫面</button>
             </div>
 
-            {/* 輪次選擇 */}
             <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                 <strong>輪次:</strong>
                 <select 
@@ -340,7 +315,6 @@ export default function App() {
                 </select>
             </div>
 
-             {/* 計時器 */}
              <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                 <button onClick={toggleTimer} style={{...btnStyle, background: timerRunning ? "#ff6b6b" : "#51cf66"}}>
                     {timerRunning ? "暫停" : "計時"}
@@ -351,7 +325,6 @@ export default function App() {
                 </span>
             </div>
             
-            {/* 換頁 */}
             <div style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
                 <button onClick={() => changePage(-1)} style={btnStyle}>⬅</button>
                 <button onClick={() => changePage(1)} style={btnStyle}>➡</button>
@@ -359,10 +332,8 @@ export default function App() {
         </div>
       </div>
 
-      {/* 比賽桌次卡片區 - 響應式 Grid */}
       <div style={{
           display: "grid",
-          // ★ 關鍵修改：使用 auto-fit 實現 RWD，手機顯示 1 欄，電腦顯示多欄
           gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
           gap: "15px",
       }}>
